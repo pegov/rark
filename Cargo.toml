@@ -1,0 +1,9 @@
+[package]
+name = "rark"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+ignore = "0.4.33"
+similar = "3.2.0"
