@@ -16,9 +16,13 @@ struct FileMeta {
     mtime: SystemTime,
 }
 
+struct FileEntry {
+    meta: FileMeta,
+    content: Option<Vec<u8>>,
+}
+
 struct Snapshot {
-    files: HashMap<PathBuf, FileMeta>,
-    contents: HashMap<PathBuf, Vec<u8>>,
+    files: HashMap<PathBuf, FileEntry>,
 }
 
 impl Snapshot {
@@ -26,7 +30,6 @@ impl Snapshot {
         let root = fs::canonicalize(root).with_context(|| format!("canonicalize {:?}", root))?;
 
         let mut files = HashMap::new();
-        let mut contents = HashMap::new();
 
         let walker = WalkBuilder::new(&root)
             .hidden(true)
@@ -55,13 +58,17 @@ impl Snapshot {
             let size = meta.len();
             let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
 
-            if let Some(bytes) = read_text(path, size) {
-                contents.insert(rel.clone(), bytes);
-            }
-            files.insert(rel, FileMeta { size, mtime });
+            let meta = FileMeta { size, mtime };
+            files.insert(
+                rel,
+                FileEntry {
+                    meta,
+                    content: read_text(path, size),
+                },
+            );
         }
 
-        Ok(Snapshot { files, contents })
+        Ok(Snapshot { files })
     }
 }
 
@@ -97,7 +104,7 @@ fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Change> {
     for (p, m) in &new.files {
         match old.files.get(p) {
             None => changes.push(Change::Added(p.clone())),
-            Some(om) if om != m => changes.push(Change::Modified(p.clone())),
+            Some(om) if om.meta != m.meta => changes.push(Change::Modified(p.clone())),
             _ => {}
         }
     }
@@ -112,50 +119,30 @@ fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Change> {
 
 fn render_change(old: &Snapshot, new: &Snapshot, c: &Change) {
     let path = c.path();
-    let (old_c, new_c): (Option<&Vec<u8>>, Option<&Vec<u8>>) = match c {
-        Change::Added(_) => (None, new.contents.get(path)),
-        Change::Deleted(_) => (old.contents.get(path), None),
-        Change::Modified(_) => (old.contents.get(path), new.contents.get(path)),
+    let old_c = old.files.get(path).and_then(|e| e.content.as_deref());
+    let new_c = new.files.get(path).and_then(|e| e.content.as_deref());
+    let a = format!("a/{}", path.display());
+    let b = format!("b/{}", path.display());
+    let (old_c, new_c, label, old_label, new_label) = match c {
+        Change::Added(_) => (Some(&[][..]), new_c, "added", "/dev/null", b.as_str()),
+        Change::Deleted(_) => (old_c, Some(&[][..]), "deleted", a.as_str(), "/dev/null"),
+        Change::Modified(_) => (old_c, new_c, "modified", a.as_str(), b.as_str()),
     };
 
-    let unreadable = match c {
-        Change::Added(_) => new_c.is_none(),
-        Change::Deleted(_) => old_c.is_none(),
-        Change::Modified(_) => old_c.is_none() || new_c.is_none(),
-    };
-
-    if unreadable {
-        let label = match c {
-            Change::Added(_) => "added",
-            Change::Deleted(_) => "deleted",
-            Change::Modified(_) => "modified",
-        };
-        println!("[{} binary or too large — content not diffed]", label);
+    let (Some(old_c), Some(new_c)) = (old_c, new_c) else {
+        println!("[{label} binary or too large — content not diffed]");
         println!();
         return;
-    }
+    };
 
-    let old_s = old_c
-        .map(|v| String::from_utf8_lossy(v))
-        .unwrap_or_default();
-    let new_s = new_c
-        .map(|v| String::from_utf8_lossy(v))
-        .unwrap_or_default();
+    let old_s = String::from_utf8_lossy(old_c);
+    let new_s = String::from_utf8_lossy(new_c);
 
     if old_s == new_s {
         println!("[metadata changed, content identical]");
         println!();
         return;
     }
-
-    let (old_label, new_label) = match c {
-        Change::Added(_) => ("/dev/null".to_string(), format!("b/{}", path.display())),
-        Change::Deleted(_) => (format!("a/{}", path.display()), "/dev/null".to_string()),
-        Change::Modified(_) => (
-            format!("a/{}", path.display()),
-            format!("b/{}", path.display()),
-        ),
-    };
 
     let text_diff = TextDiff::from_lines(old_s.as_ref(), new_s.as_ref());
     print!(
