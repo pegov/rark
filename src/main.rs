@@ -42,10 +42,7 @@ impl Snapshot {
 
         for entry in walker {
             let entry = entry?;
-            let Some(ft) = entry.file_type() else {
-                continue;
-            };
-            if !ft.is_file() {
+            if !entry.file_type().is_some_and(|ft| ft.is_file()) {
                 continue;
             }
             let path = entry.path();
@@ -77,10 +74,7 @@ fn read_text(path: &Path, size: u64) -> Option<Vec<u8>> {
         return None;
     }
     let bytes = fs::read(path).ok()?;
-    if bytes.contains(&0) {
-        return None;
-    }
-    Some(bytes)
+    (!bytes.contains(&0)).then_some(bytes)
 }
 
 #[derive(Debug)]
