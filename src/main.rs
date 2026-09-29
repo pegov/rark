@@ -234,14 +234,14 @@ fn save_run(
     Ok(())
 }
 
-fn show_history(conn: &Connection, root: &Path) -> Result<()> {
+fn show_history(conn: &Connection, root: &Path, limit: i64) -> Result<()> {
     let root = root.to_str().context("project path is not UTF-8")?;
     let mut runs = conn.prepare(
         "SELECT runs.id, runs.recorded_at FROM runs
          JOIN projects ON projects.id = runs.project_id
-         WHERE projects.root = ?1 ORDER BY runs.id DESC",
+         WHERE projects.root = ?1 ORDER BY runs.id DESC LIMIT ?2",
     )?;
-    let mut rows = runs.query([root])?;
+    let mut rows = runs.query(params![root, limit])?;
     let mut found = false;
     while let Some(row) = rows.next()? {
         found = true;
@@ -265,18 +265,54 @@ fn show_history(conn: &Connection, root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn history_options(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<(PathBuf, i64)> {
+    let mut args = args.into_iter();
+    let mut path = None;
+    let mut limit = None;
+    while let Some(arg) = args.next() {
+        if arg == "--limit" {
+            if limit.is_some() {
+                bail!("--limit specified twice");
+            }
+            limit = Some(parse_limit(
+                args.next().context("--limit requires a number")?,
+            )?);
+        } else if path.is_none() {
+            path = Some(PathBuf::from(arg));
+        } else {
+            bail!("usage: rark history [path] [--limit N]");
+        }
+    }
+    Ok((
+        path.unwrap_or_else(|| PathBuf::from(".")),
+        limit.unwrap_or(5),
+    ))
+}
+
+fn parse_limit(value: std::ffi::OsString) -> Result<i64> {
+    let limit: i64 = value
+        .to_str()
+        .context("limit must be a positive integer")?
+        .parse()
+        .context("limit must be a positive integer")?;
+    if limit < 1 {
+        bail!("limit must be a positive integer");
+    }
+    Ok(limit)
+}
+
 fn main() -> Result<()> {
     let mut args = std::env::args_os().skip(1);
     let first = args.next();
-    let history = first.as_deref() == Some(std::ffi::OsStr::new("history"));
-    let root = if history { args.next() } else { first };
+    if first.as_deref() == Some(std::ffi::OsStr::new("history")) {
+        let (path, limit) = history_options(args)?;
+        let root = project_root(&path)?;
+        return show_history(&open_history()?, &root, limit);
+    }
     if args.next().is_some() {
-        bail!("usage: rark [path] | rark history [path]");
+        bail!("usage: rark [path] | rark history [path] [--limit N]");
     }
-    let root = project_root(&PathBuf::from(root.unwrap_or_else(|| ".".into())))?;
-    if history {
-        return show_history(&open_history()?, &root);
-    }
+    let root = project_root(&PathBuf::from(first.unwrap_or_else(|| ".".into())))?;
 
     println!("Taking checkpoint of {}", root.display());
     io::stdout().flush()?;
