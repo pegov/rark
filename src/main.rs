@@ -5,11 +5,42 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use clap::{Parser, Subcommand};
 use ignore::WalkBuilder;
 use rusqlite::{Connection, params};
 use similar::TextDiff;
 
 const MAX_CONTENT: u64 = 1 * 1024 * 1024;
+
+#[derive(Parser, Debug)]
+#[command(about = "Checkpoint and diff project files")]
+struct Cli {
+    /// Project directory to checkpoint (defaults to the current directory)
+    #[arg(default_value = ".")]
+    path: PathBuf,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Show previous diffs for a project
+    History {
+        /// Project directory (defaults to the current directory)
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Maximum number of runs to show
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = 5,
+            value_parser = clap::value_parser!(i64).range(1..)
+        )]
+        limit: i64,
+    },
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FileMeta {
@@ -265,54 +296,13 @@ fn show_history(conn: &Connection, root: &Path, limit: i64) -> Result<()> {
     Ok(())
 }
 
-fn history_options(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<(PathBuf, i64)> {
-    let mut args = args.into_iter();
-    let mut path = None;
-    let mut limit = None;
-    while let Some(arg) = args.next() {
-        if arg == "--limit" {
-            if limit.is_some() {
-                bail!("--limit specified twice");
-            }
-            limit = Some(parse_limit(
-                args.next().context("--limit requires a number")?,
-            )?);
-        } else if path.is_none() {
-            path = Some(PathBuf::from(arg));
-        } else {
-            bail!("usage: rark history [path] [--limit N]");
-        }
-    }
-    Ok((
-        path.unwrap_or_else(|| PathBuf::from(".")),
-        limit.unwrap_or(5),
-    ))
-}
-
-fn parse_limit(value: std::ffi::OsString) -> Result<i64> {
-    let limit: i64 = value
-        .to_str()
-        .context("limit must be a positive integer")?
-        .parse()
-        .context("limit must be a positive integer")?;
-    if limit < 1 {
-        bail!("limit must be a positive integer");
-    }
-    Ok(limit)
-}
-
 fn main() -> Result<()> {
-    let mut args = std::env::args_os().skip(1);
-    let first = args.next();
-    if first.as_deref() == Some(std::ffi::OsStr::new("history")) {
-        let (path, limit) = history_options(args)?;
+    let cli = Cli::parse();
+    if let Some(Command::History { path, limit }) = cli.command {
         let root = project_root(&path)?;
         return show_history(&open_history()?, &root, limit);
     }
-    if args.next().is_some() {
-        bail!("usage: rark [path] | rark history [path] [--limit N]");
-    }
-    let root = project_root(&PathBuf::from(first.unwrap_or_else(|| ".".into())))?;
+    let root = project_root(&cli.path)?;
 
     println!("Taking checkpoint of {}", root.display());
     io::stdout().flush()?;
