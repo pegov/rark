@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use ignore::WalkBuilder;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use similar::TextDiff;
 
 const MAX_CONTENT: u64 = 1 * 1024 * 1024;
@@ -39,6 +39,12 @@ enum Command {
             value_parser = clap::value_parser!(i64).range(1..)
         )]
         limit: i64,
+    },
+    /// Print the latest saved diff as a message for an LLM agent
+    Btw {
+        /// Project directory (defaults to the current directory)
+        #[arg(default_value = ".")]
+        path: PathBuf,
     },
 }
 
@@ -296,11 +302,50 @@ fn show_history(conn: &Connection, root: &Path, limit: i64) -> Result<()> {
     Ok(())
 }
 
+fn latest_btw(conn: &Connection, root: &Path) -> Result<String> {
+    let root = root.to_str().context("project path is not UTF-8")?;
+    let run_id: i64 = conn
+        .query_row(
+            "SELECT runs.id FROM runs
+             JOIN projects ON projects.id = runs.project_id
+             WHERE projects.root = ?1 ORDER BY runs.id DESC LIMIT 1",
+            [root],
+            |row| row.get(0),
+        )
+        .optional()?
+        .with_context(|| format!("No saved runs for {root}."))?;
+
+    let mut message = String::from("btw, i changed this:\n<diff>\n");
+    let mut changes =
+        conn.prepare("SELECT path, kind, diff FROM changes WHERE run_id = ?1 ORDER BY rowid")?;
+    let mut entries = changes.query([run_id])?;
+    while let Some(entry) = entries.next()? {
+        let path: String = entry.get(0)?;
+        let kind: String = entry.get(1)?;
+        let diff: String = entry.get(2)?;
+        message.push_str(&format!("{kind}: {path}\n{diff}"));
+        if !diff.ends_with('\n') {
+            message.push('\n');
+        }
+    }
+    message.push_str("</diff>\n");
+    Ok(message)
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    if let Some(Command::History { path, limit }) = cli.command {
-        let root = project_root(&path)?;
-        return show_history(&open_history()?, &root, limit);
+    match cli.command {
+        Some(Command::History { path, limit }) => {
+            let root = project_root(&path)?;
+            return show_history(&open_history()?, &root, limit);
+        }
+        Some(Command::Btw { path }) => {
+            let root = project_root(&path)?;
+            let message = latest_btw(&open_history()?, &root)?;
+            io::stdout().write_all(message.as_bytes())?;
+            return Ok(());
+        }
+        None => {}
     }
     let root = project_root(&cli.path)?;
 
