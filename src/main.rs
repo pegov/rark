@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use ignore::WalkBuilder;
+use rusqlite::{Connection, params};
 use similar::TextDiff;
 
 const MAX_CONTENT: u64 = 1 * 1024 * 1024;
@@ -111,7 +112,7 @@ fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Change> {
     changes
 }
 
-fn render_change(old: &Snapshot, new: &Snapshot, c: &Change) {
+fn render_change(old: &Snapshot, new: &Snapshot, c: &Change) -> String {
     let path = c.path();
     let old_c = old.files.get(path).and_then(|e| e.content.as_deref());
     let new_c = new.files.get(path).and_then(|e| e.content.as_deref());
@@ -124,34 +125,158 @@ fn render_change(old: &Snapshot, new: &Snapshot, c: &Change) {
     };
 
     let (Some(old_c), Some(new_c)) = (old_c, new_c) else {
-        println!("[{label} binary or too large — content not diffed]");
-        println!();
-        return;
+        return format!("[{label} binary or too large — content not diffed]\n\n");
     };
 
     let old_s = String::from_utf8_lossy(old_c);
     let new_s = String::from_utf8_lossy(new_c);
 
     if old_s == new_s {
-        println!("[metadata changed, content identical]");
-        println!();
-        return;
+        return "[metadata changed, content identical]\n\n".to_string();
     }
 
     let text_diff = TextDiff::from_lines(old_s.as_ref(), new_s.as_ref());
-    print!(
-        "{}",
+    format!(
+        "{}\n",
         text_diff
             .unified_diff()
             .context_radius(3)
             .header(&old_label, &new_label)
-    );
-    println!();
+    )
+}
+
+fn database_path() -> Result<PathBuf> {
+    let base = if let Some(dir) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+        PathBuf::from(dir)
+    } else if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home).join(".local/share")
+    } else if let Some(dir) = std::env::var_os("APPDATA") {
+        PathBuf::from(dir)
+    } else {
+        bail!("set XDG_DATA_HOME, HOME, or APPDATA to locate the history database");
+    };
+    let dir = base.join("rark");
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    Ok(dir.join("history.sqlite3"))
+}
+
+fn project_root(path: &Path) -> Result<PathBuf> {
+    let path =
+        fs::canonicalize(path).with_context(|| format!("canonicalize {}", path.display()))?;
+    if !path.is_dir() {
+        bail!("{} is not a directory", path.display());
+    }
+    Ok(path
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .unwrap_or(&path)
+        .to_path_buf())
+}
+
+fn open_history() -> Result<Connection> {
+    let db = database_path()?;
+    let conn = Connection::open(&db).with_context(|| format!("open {}", db.display()))?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS projects (
+            id INTEGER PRIMARY KEY,
+            root TEXT NOT NULL UNIQUE
+        );
+        CREATE TABLE IF NOT EXISTS runs (
+            id INTEGER PRIMARY KEY,
+            project_id INTEGER NOT NULL REFERENCES projects(id),
+            recorded_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS runs_by_project ON runs(project_id, id);
+        CREATE TABLE IF NOT EXISTS changes (
+            run_id INTEGER NOT NULL REFERENCES runs(id),
+            path TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            diff TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS changes_by_run ON changes(run_id);",
+    )?;
+    Ok(conn)
+}
+
+fn save_run(
+    conn: &mut Connection,
+    root: &Path,
+    changes: &[Change],
+    before: &Snapshot,
+    after: &Snapshot,
+) -> Result<()> {
+    let root = root.to_str().context("project path is not UTF-8")?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+    let tx = conn.transaction()?;
+    tx.execute("INSERT OR IGNORE INTO projects(root) VALUES (?1)", [root])?;
+    let project_id: i64 =
+        tx.query_row("SELECT id FROM projects WHERE root = ?1", [root], |row| {
+            row.get(0)
+        })?;
+    tx.execute(
+        "INSERT INTO runs(project_id, recorded_at) VALUES (?1, ?2)",
+        params![project_id, now],
+    )?;
+    let run_id = tx.last_insert_rowid();
+    for change in changes {
+        let (kind, path) = match change {
+            Change::Added(path) => ("added", path),
+            Change::Modified(path) => ("modified", path),
+            Change::Deleted(path) => ("deleted", path),
+        };
+        let path = path.to_str().context("changed path is not UTF-8")?;
+        tx.execute(
+            "INSERT INTO changes(run_id, path, kind, diff) VALUES (?1, ?2, ?3, ?4)",
+            params![run_id, path, kind, render_change(before, after, change)],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn show_history(conn: &Connection, root: &Path) -> Result<()> {
+    let root = root.to_str().context("project path is not UTF-8")?;
+    let mut runs = conn.prepare(
+        "SELECT runs.id, runs.recorded_at FROM runs
+         JOIN projects ON projects.id = runs.project_id
+         WHERE projects.root = ?1 ORDER BY runs.id DESC",
+    )?;
+    let mut rows = runs.query([root])?;
+    let mut found = false;
+    while let Some(row) = rows.next()? {
+        found = true;
+        let run_id: i64 = row.get(0)?;
+        let recorded_at: i64 = row.get(1)?;
+        println!("Run {run_id} (Unix timestamp {recorded_at}):");
+        let mut changes =
+            conn.prepare("SELECT path, kind, diff FROM changes WHERE run_id = ?1 ORDER BY rowid")?;
+        let mut entries = changes.query([run_id])?;
+        while let Some(entry) = entries.next()? {
+            let path: String = entry.get(0)?;
+            let kind: String = entry.get(1)?;
+            let diff: String = entry.get(2)?;
+            println!("{kind}: {path}");
+            print!("{diff}");
+        }
+    }
+    if !found {
+        println!("No history for {root}.");
+    }
+    Ok(())
 }
 
 fn main() -> Result<()> {
-    let root = std::env::args().nth(1).unwrap_or_else(|| ".".to_string());
-    let root = PathBuf::from(root);
+    let mut args = std::env::args_os().skip(1);
+    let first = args.next();
+    let history = first.as_deref() == Some(std::ffi::OsStr::new("history"));
+    let root = if history { args.next() } else { first };
+    if args.next().is_some() {
+        bail!("usage: rark [path] | rark history [path]");
+    }
+    let root = project_root(&PathBuf::from(root.unwrap_or_else(|| ".".into())))?;
+    if history {
+        return show_history(&open_history()?, &root);
+    }
 
     println!("Taking checkpoint of {}", root.display());
     io::stdout().flush()?;
@@ -171,9 +296,12 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    let mut conn = open_history()?;
+    save_run(&mut conn, &root, &changes, &before, &after)?;
     println!("{} change(s):\n", changes.len());
     for c in &changes {
-        render_change(&before, &after, c);
+        println!("{}", c.path().display());
+        print!("{}", render_change(&before, &after, c));
     }
 
     Ok(())
