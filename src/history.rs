@@ -128,7 +128,7 @@ pub(crate) fn latest_btw(conn: &Connection, root: &Path) -> Result<String> {
         .optional()?
         .with_context(|| format!("No saved runs for {root}."))?;
 
-    let mut message = String::from("btw, i changed this:\n<diff>\n");
+    let mut diff_text = String::new();
     let mut changes =
         conn.prepare("SELECT path, kind, diff FROM changes WHERE run_id = ?1 ORDER BY rowid")?;
     let mut entries = changes.query([run_id])?;
@@ -136,11 +136,28 @@ pub(crate) fn latest_btw(conn: &Connection, root: &Path) -> Result<String> {
         let path: String = entry.get(0)?;
         let kind: String = entry.get(1)?;
         let diff: String = entry.get(2)?;
-        message.push_str(&format!("{kind}: {path}\n{diff}"));
+        diff_text.push_str(&format!("{kind}: {path}\n{diff}"));
         if !diff.ends_with('\n') {
-            message.push('\n');
+            diff_text.push('\n');
         }
     }
-    message.push_str("</diff>\n");
-    Ok(message)
+    let template = if let Some(home) = std::env::var_os("HOME") {
+        let template_path = PathBuf::from(home).join(".config/rark/btw.md");
+        read_btw_template(&template_path)?
+    } else {
+        DEFAULT_BTW_TEMPLATE.to_string()
+    };
+    Ok(template.replace("{{DIFF}}", &diff_text))
+}
+
+const DEFAULT_BTW_TEMPLATE: &str = "btw, i changed this:\n<diff>\n{{DIFF}}</diff>\n";
+
+fn read_btw_template(path: &Path) -> Result<String> {
+    match fs::read_to_string(path) {
+        Ok(template) => Ok(template),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Ok(DEFAULT_BTW_TEMPLATE.to_string())
+        }
+        Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
+    }
 }
