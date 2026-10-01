@@ -35,5 +35,9 @@ pub(crate) enum Command {
         /// Project directory (defaults to the current directory)
         #[arg(default_value = ".")]
         path: PathBuf,
+
+        /// Copy the message to the terminal clipboard via OSC 52
+        #[arg(long)]
+        copy: bool,
     },
 }

@@ -1,4 +1,5 @@
 mod cli;
+mod clipboard;
 mod diff;
 mod history;
 mod project;
@@ -10,6 +11,7 @@ use anyhow::Result;
 use clap::Parser;
 
 use crate::cli::{Cli, Command};
+use crate::clipboard::copy_to_clipboard;
 use crate::diff::{diff, render_change};
 use crate::history::{latest_btw, open_history, save_run, show_history};
 use crate::project::project_root;
@@ -22,10 +24,13 @@ fn main() -> Result<()> {
             let root = project_root(&path)?;
             return show_history(&open_history()?, &root, limit);
         }
-        Some(Command::Btw { path }) => {
+        Some(Command::Btw { path, copy }) => {
             let root = project_root(&path)?;
             let message = latest_btw(&open_history()?, &root)?;
             io::stdout().write_all(message.as_bytes())?;
+            if copy {
+                copy_to_clipboard(&message)?;
+            }
             return Ok(());
         }
         None => {}
