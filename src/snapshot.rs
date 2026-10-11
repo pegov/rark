@@ -29,14 +29,7 @@ impl Snapshot {
 
         let mut files = HashMap::new();
 
-        let walker = WalkBuilder::new(&root)
-            .hidden(true)
-            .git_ignore(true)
-            .git_global(true)
-            .git_exclude(true)
-            .parents(true)
-            .follow_links(false)
-            .build();
+        let walker = WalkBuilder::new(&root).build();
 
         for entry in walker {
             let entry = entry?;
