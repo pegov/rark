@@ -6,7 +6,7 @@ use std::time::SystemTime;
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 
-const MAX_CONTENT: u64 = 1 * 1024 * 1024;
+const MAX_CONTENT: u64 = 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FileMeta {

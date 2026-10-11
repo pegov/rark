@@ -67,6 +67,6 @@ pub(crate) fn render_change(old: &Snapshot, new: &Snapshot, c: &Change) -> Strin
         text_diff
             .unified_diff()
             .context_radius(3)
-            .header(&old_label, &new_label)
+            .header(old_label, new_label)
     )
 }
