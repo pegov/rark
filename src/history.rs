@@ -94,6 +94,8 @@ pub(crate) fn show_history(conn: &Connection, root: &Path, limit: i64) -> Result
          JOIN projects ON projects.id = runs.project_id
          WHERE projects.root = ?1 ORDER BY runs.id DESC LIMIT ?2",
     )?;
+    let mut changes =
+        conn.prepare("SELECT path, kind, diff FROM changes WHERE run_id = ?1 ORDER BY rowid")?;
     let mut rows = runs.query(params![root, limit])?;
     let mut found = false;
     while let Some(row) = rows.next()? {
@@ -101,8 +103,6 @@ pub(crate) fn show_history(conn: &Connection, root: &Path, limit: i64) -> Result
         let run_id: i64 = row.get(0)?;
         let recorded_at: i64 = row.get(1)?;
         println!("Run {run_id} (Unix timestamp {recorded_at}):");
-        let mut changes =
-            conn.prepare("SELECT path, kind, diff FROM changes WHERE run_id = ?1 ORDER BY rowid")?;
         let mut entries = changes.query([run_id])?;
         while let Some(entry) = entries.next()? {
             let path: String = entry.get(0)?;
