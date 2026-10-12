@@ -17,6 +17,14 @@ impl Change {
             Change::Added(p) | Change::Modified(p) | Change::Deleted(p) => p,
         }
     }
+
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Change::Added(_) => "added",
+            Change::Modified(_) => "modified",
+            Change::Deleted(_) => "deleted",
+        }
+    }
 }
 
 pub(crate) fn diff(old: &Snapshot, new: &Snapshot) -> Vec<Change> {
@@ -44,11 +52,12 @@ pub(crate) fn render_change(old: &Snapshot, new: &Snapshot, c: &Change) -> Strin
     let new_c = new.files.get(path).and_then(|e| e.content.as_deref());
     let a = format!("a/{}", path.display());
     let b = format!("b/{}", path.display());
-    let (old_c, new_c, label, old_label, new_label) = match c {
-        Change::Added(_) => (Some(&[][..]), new_c, "added", "/dev/null", b.as_str()),
-        Change::Deleted(_) => (old_c, Some(&[][..]), "deleted", a.as_str(), "/dev/null"),
-        Change::Modified(_) => (old_c, new_c, "modified", a.as_str(), b.as_str()),
+    let (old_c, new_c, old_label, new_label) = match c {
+        Change::Added(_) => (Some(&[][..]), new_c, "/dev/null", b.as_str()),
+        Change::Deleted(_) => (old_c, Some(&[][..]), a.as_str(), "/dev/null"),
+        Change::Modified(_) => (old_c, new_c, a.as_str(), b.as_str()),
     };
+    let label = c.kind();
 
     let (Some(old_c), Some(new_c)) = (old_c, new_c) else {
         return format!("[{label} binary or too large — content not diffed]\n\n");

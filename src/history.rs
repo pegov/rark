@@ -69,15 +69,18 @@ pub(crate) fn save_run(
     )?;
     let run_id = tx.last_insert_rowid();
     for change in changes {
-        let (kind, path) = match change {
-            Change::Added(path) => ("added", path),
-            Change::Modified(path) => ("modified", path),
-            Change::Deleted(path) => ("deleted", path),
-        };
-        let path = path.to_str().context("changed path is not UTF-8")?;
+        let path = change
+            .path()
+            .to_str()
+            .context("changed path is not UTF-8")?;
         tx.execute(
             "INSERT INTO changes(run_id, path, kind, diff) VALUES (?1, ?2, ?3, ?4)",
-            params![run_id, path, kind, render_change(before, after, change)],
+            params![
+                run_id,
+                path,
+                change.kind(),
+                render_change(before, after, change),
+            ],
         )?;
     }
     tx.commit()?;
