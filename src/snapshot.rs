@@ -8,7 +8,7 @@ use ignore::WalkBuilder;
 
 const MAX_CONTENT: u64 = 1024 * 1024;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct FileMeta {
     size: u64,
     mtime: SystemTime,
